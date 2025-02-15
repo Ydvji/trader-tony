@@ -74,16 +74,87 @@ class RaydiumSniper:
 
     async def monitor_lp_addition(self, config: SnipeConfig) -> None:
         """Monitor Raydium program for LP addition events."""
-        # Subscribe to program account changes
-        async def process_account_update(account_info):
-            if self.is_lp_addition_event(account_info, config.token_address):
-                await self.execute_snipe(config)
+        try:
+            print(f"Starting LP monitoring for token: {config.token_address}")
+            
+            # Convert token address to PublicKey
+            token_mint = PublicKey(config.token_address)
+            
+            # Subscribe to program account changes
+            async def process_account_update(account_info):
+                try:
+                    if await self.is_lp_addition_event(account_info, token_mint):
+                        print(f"🔥 LP Addition detected for {config.token_address}")
+                        await self.execute_snipe(config)
+                except Exception as e:
+                    print(f"Error processing account update: {str(e)}")
 
-        # Set up subscription
-        await self.client.account_subscribe(
-            self.RAYDIUM_PROGRAM_ID,
-            process_account_update
-        )
+            # Set up subscription with specific filters
+            await self.client.account_subscribe(
+                self.RAYDIUM_PROGRAM_ID,
+                process_account_update,
+                encoding="base64",
+                filters=[
+                    {"memcmp": {"offset": 72, "bytes": str(token_mint)}}
+                ]
+            )
+            
+            print(f"✅ Monitoring established for {config.token_address}")
+            
+        except Exception as e:
+            print(f"Failed to set up LP monitoring: {str(e)}")
+            raise
+
+    async def is_lp_addition_event(self, account_info: Any, token_mint: PublicKey) -> bool:
+        """Check if an account update is an LP addition event."""
+        try:
+            if not account_info or not account_info.data:
+                return False
+                
+            # Parse account data
+            data = account_info.data
+            
+            # Check if this is a pool initialization or LP addition
+            # Raydium specific offsets for pool state
+            POOL_STATE_LAYOUT = {
+                'STATUS_OFFSET': 0,
+                'POOL_STATE_ACTIVE': 1,
+                'TOKEN_MINT_OFFSET': 72,
+                'LP_SUPPLY_OFFSET': 168,
+            }
+            
+            # Verify pool is active
+            pool_status = int.from_bytes(data[POOL_STATE_LAYOUT['STATUS_OFFSET']:POOL_STATE_LAYOUT['STATUS_OFFSET']+1], 'little')
+            if pool_status != POOL_STATE_LAYOUT['POOL_STATE_ACTIVE']:
+                return False
+                
+            # Verify token mint matches
+            pool_token_mint = PublicKey(data[POOL_STATE_LAYOUT['TOKEN_MINT_OFFSET']:POOL_STATE_LAYOUT['TOKEN_MINT_OFFSET']+32])
+            if pool_token_mint != token_mint:
+                return False
+                
+            # Check LP supply change
+            new_lp_supply = int.from_bytes(data[POOL_STATE_LAYOUT['LP_SUPPLY_OFFSET']:POOL_STATE_LAYOUT['LP_SUPPLY_OFFSET']+8], 'little')
+            
+            # Store previous LP supply for comparison
+            if not hasattr(self, '_previous_lp_supplies'):
+                self._previous_lp_supplies = {}
+            
+            previous_supply = self._previous_lp_supplies.get(str(token_mint), 0)
+            self._previous_lp_supplies[str(token_mint)] = new_lp_supply
+            
+            # Detect significant LP addition (>1% increase)
+            if previous_supply > 0:
+                supply_increase = (new_lp_supply - previous_supply) / previous_supply
+                return supply_increase > 0.01  # 1% threshold
+            
+            # For new pools, require minimum LP supply
+            MIN_LP_SUPPLY = 1000000  # Adjust based on token decimals
+            return new_lp_supply >= MIN_LP_SUPPLY
+            
+        except Exception as e:
+            print(f"Error checking LP addition event: {str(e)}")
+            return False
 
     async def execute_snipe(self, config: SnipeConfig) -> Optional[str]:
         """Execute the snipe operation."""
@@ -225,31 +296,272 @@ class RaydiumSniper:
             return None
 
     async def create_raydium_swap_instructions(self, token_address: str, amount: float, slippage: float):
-        """Create Raydium swap instructions."""
-        # Implementation depends on Raydium API
-        # This is a placeholder
-        return []
+        """Create Raydium swap instructions for token purchase."""
+        try:
+            # Convert token address to PublicKey
+            token_mint = PublicKey(token_address)
+            
+            # Constants for Raydium V4
+            RAYDIUM_AMM_PROGRAM_ID = PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8')
+            SOL_MINT = PublicKey('So11111111111111111111111111111111111111112')
+            
+            # Get pool state accounts
+            pool_keys = await self._get_pool_keys(token_mint)
+            
+            # Calculate amounts with slippage
+            amount_in = int(amount * 1e9)  # Convert SOL to lamports
+            min_amount_out = int(amount_in * (1 - slippage / 100))
+            
+            # Build swap instruction
+            swap_instruction = await self._build_swap_instruction(
+                amount_in=amount_in,
+                min_amount_out=min_amount_out,
+                pool_keys=pool_keys,
+                is_sol_input=True
+            )
+            
+            # Create associated token account if needed
+            token_account = await self._get_or_create_associated_token_account(token_mint)
+            
+            # Build complete instruction set
+            instructions = [
+                # Transfer SOL to AMM authority
+                transfer(
+                    TransferParams(
+                        from_pubkey=self.wallet.public_key(),
+                        to_pubkey=pool_keys['authority'],
+                        lamports=amount_in
+                    )
+                ),
+                # Execute swap
+                swap_instruction
+            ]
+            
+            return instructions
+            
+        except Exception as e:
+            raise Exception(f"Failed to create swap instructions: {str(e)}")
+            
+    async def _get_pool_keys(self, token_mint: PublicKey) -> Dict[str, PublicKey]:
+        """Get Raydium pool accounts for a given token."""
+        try:
+            # Get program accounts filtered for the token mint
+            accounts = await self.client.get_program_accounts(
+                self.RAYDIUM_PROGRAM_ID,
+                encoding="base64",
+                filters=[
+                    {"memcmp": {"offset": 72, "bytes": str(token_mint)}}
+                ]
+            )
+            
+            if not accounts:
+                raise Exception(f"No liquidity pool found for token {token_mint}")
+                
+            # Parse pool data
+            pool_data = accounts[0]
+            
+            return {
+                'id': PublicKey(pool_data.pubkey),
+                'authority': PublicKey(pool_data.account.owner),
+                'base_vault': PublicKey(pool_data.account.data['baseVault']),
+                'quote_vault': PublicKey(pool_data.account.data['quoteVault']),
+                'lp_mint': PublicKey(pool_data.account.data['lpMint']),
+                'open_orders': PublicKey(pool_data.account.data['openOrders']),
+                'target_orders': PublicKey(pool_data.account.data['targetOrders']),
+                'base_mint': PublicKey(pool_data.account.data['baseMint']),
+                'quote_mint': PublicKey(pool_data.account.data['quoteMint']),
+            }
+            
+        except Exception as e:
+            raise Exception(f"Failed to get pool keys: {str(e)}")
+            
+    async def _build_swap_instruction(
+        self,
+        amount_in: int,
+        min_amount_out: int,
+        pool_keys: Dict[str, PublicKey],
+        is_sol_input: bool
+    ):
+        """Build Raydium swap instruction."""
+        # Define accounts needed for swap
+        accounts = [
+            AccountMeta(pubkey=pool_keys['id'], is_signer=False, is_writable=True),
+            AccountMeta(pubkey=pool_keys['authority'], is_signer=False, is_writable=False),
+            AccountMeta(pubkey=pool_keys['open_orders'], is_signer=False, is_writable=True),
+            AccountMeta(pubkey=pool_keys['target_orders'], is_signer=False, is_writable=True),
+            AccountMeta(pubkey=pool_keys['base_vault'], is_signer=False, is_writable=True),
+            AccountMeta(pubkey=pool_keys['quote_vault'], is_signer=False, is_writable=True),
+            AccountMeta(pubkey=self.wallet.public_key(), is_signer=True, is_writable=False),
+        ]
+        
+        # Build instruction data
+        instruction_data = bytes([
+            1,  # Instruction index for swap
+            *amount_in.to_bytes(8, 'little'),  # Amount in
+            *min_amount_out.to_bytes(8, 'little'),  # Minimum amount out
+        ])
+        
+        return Transaction().add(
+            self.RAYDIUM_PROGRAM_ID,
+            accounts,
+            instruction_data
+        )
+        
+    async def _get_or_create_associated_token_account(self, token_mint: PublicKey) -> PublicKey:
+        """Get or create associated token account for wallet."""
+        try:
+            # Get associated token account address
+            ata = await self._find_associated_token_address(
+                self.wallet.public_key(),
+                token_mint
+            )
+            
+            # Check if account exists
+            account_info = await self.client.get_account_info(ata)
+            
+            if not account_info:
+                # Create new associated token account
+                create_ata_ix = self._create_associated_token_account_instruction(
+                    payer=self.wallet.public_key(),
+                    owner=self.wallet.public_key(),
+                    mint=token_mint
+                )
+                
+                # Send and confirm transaction
+                await self.send_and_confirm_transaction(
+                    Transaction().add(create_ata_ix)
+                )
+                
+            return ata
+            
+        except Exception as e:
+            raise Exception(f"Failed to get/create token account: {str(e)}")
+            
+    async def _find_associated_token_address(
+        self,
+        wallet_address: PublicKey,
+        token_mint: PublicKey
+    ) -> PublicKey:
+        """Find the associated token account address."""
+        seeds = [
+            bytes(wallet_address),
+            bytes(PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')),  # Token program ID
+            bytes(token_mint)
+        ]
+        
+        program_id = PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL')  # Associated token program ID
+        
+        return PublicKey.find_program_address(seeds, program_id)[0]
 
     async def get_transaction_price(self, signature: str) -> float:
         """Get price from a transaction."""
-        # Implementation depends on Raydium API
-        # This is a placeholder
-        return 0.0
+        try:
+            # Get transaction details
+            tx_details = await self.client.get_transaction(
+                signature,
+                encoding="jsonParsed",
+                max_supported_transaction_version=0
+            )
+            
+            if not tx_details:
+                raise Exception(f"Transaction {signature} not found")
+                
+            # Extract price from post balances
+            pre_balance = tx_details.value.meta.pre_balances[0]  # Wallet's pre-balance
+            post_balance = tx_details.value.meta.post_balances[0]  # Wallet's post-balance
+            
+            # Calculate amount spent in SOL
+            amount_spent = (pre_balance - post_balance) / 1e9
+            
+            # Get token amount from token balances
+            token_balance_change = None
+            for token_balance in tx_details.value.meta.post_token_balances:
+                if token_balance.owner == str(self.wallet.public_key()):
+                    token_balance_change = float(token_balance.ui_token_amount.amount)
+                    
+            if not token_balance_change:
+                raise Exception("Could not determine token amount from transaction")
+                
+            # Calculate price per token in SOL
+            return amount_spent / token_balance_change
+            
+        except Exception as e:
+            print(f"Error getting transaction price: {str(e)}")
+            return 0.0
 
     async def get_current_price(self, token_address: str) -> float:
-        """Get current token price."""
-        # Implementation depends on Raydium API
-        # This is a placeholder
-        return 0.0
+        """Get current token price from Raydium pool."""
+        try:
+            # Convert token address to PublicKey
+            token_mint = PublicKey(token_address)
+            
+            # Get pool accounts
+            pool_keys = await self._get_pool_keys(token_mint)
+            
+            # Get pool state data
+            pool_info = await self.client.get_account_info(
+                pool_keys['id'],
+                encoding="base64"
+            )
+            
+            if not pool_info or not pool_info.data:
+                raise Exception("Could not fetch pool data")
+                
+            # Extract reserves from pool data
+            # Note: Actual offsets depend on Raydium pool layout
+            BASE_RESERVE_OFFSET = 200
+            QUOTE_RESERVE_OFFSET = 208
+            
+            base_reserve = int.from_bytes(
+                pool_info.data[BASE_RESERVE_OFFSET:BASE_RESERVE_OFFSET+8],
+                'little'
+            )
+            quote_reserve = int.from_bytes(
+                pool_info.data[QUOTE_RESERVE_OFFSET:QUOTE_RESERVE_OFFSET+8],
+                'little'
+            )
+            
+            if base_reserve == 0:
+                return 0.0
+                
+            # Calculate price (in SOL)
+            # Adjust decimals based on token decimals
+            return quote_reserve / base_reserve * 1e9
+            
+        except Exception as e:
+            print(f"Error getting current price: {str(e)}")
+            return 0.0
 
     async def send_and_confirm_transaction(self, transaction: Transaction) -> str:
         """Send and confirm a transaction."""
-        # Implementation depends on Solana API
-        # This is a placeholder
-        return ""
-
-    def is_lp_addition_event(self, account_info: Any, token_address: str) -> bool:
-        """Check if an account update is an LP addition event."""
-        # Implementation depends on Raydium API
-        # This is a placeholder
-        return False
+        try:
+            # Get recent blockhash
+            recent_blockhash = await self.client.get_recent_blockhash()
+            transaction.recent_blockhash = recent_blockhash.value.blockhash
+            
+            # Sign transaction
+            transaction.sign(self.wallet)
+            
+            # Send transaction
+            signature = await self.client.send_transaction(
+                transaction,
+                self.wallet,
+                opts={
+                    'skip_preflight': True,  # Skip preflight for faster execution
+                    'max_retries': 3,  # Retry on failure
+                }
+            )
+            
+            # Wait for confirmation
+            confirmation = await self.client.confirm_transaction(
+                signature.value,
+                commitment="confirmed"
+            )
+            
+            if confirmation.value.err:
+                raise Exception(f"Transaction failed: {confirmation.value.err}")
+                
+            return str(signature.value)
+            
+        except Exception as e:
+            raise Exception(f"Failed to send transaction: {str(e)}")
