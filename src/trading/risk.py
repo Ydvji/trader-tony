@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 from solana.rpc.async_api import AsyncClient
 from solders.pubkey import Pubkey as PublicKey
 
-from ..utils.config import config
+from utils.config import config
 
 @dataclass
 class RiskAnalysis:

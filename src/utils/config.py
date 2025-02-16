@@ -28,17 +28,26 @@ class RiskConfig:
     min_verification_score: int = 80
     suspicious_pattern_threshold: float = 50.0  # 50% price change threshold
 
+from dataclasses import field
+
+def default_trading_config() -> TradingConfig:
+    return TradingConfig()
+
+def default_risk_config() -> RiskConfig:
+    return RiskConfig()
+
 @dataclass
 class Config:
     """Main configuration class."""
-    # API Keys and URLs
-    telegram_token: str = os.getenv('TELEGRAM_BOT_TOKEN', '')
-    solana_rpc_url: str = os.getenv('SOLANA_RPC_URL', '')
-    wallet_private_key: str = os.getenv('WALLET_PRIVATE_KEY', '')
+    # Sub-configurations with proper default factories
+    trading: TradingConfig = field(default_factory=default_trading_config)
+    risk: RiskConfig = field(default_factory=default_risk_config)
     
-    # Sub-configurations
-    trading: TradingConfig = TradingConfig()
-    risk: RiskConfig = RiskConfig()
+    # API Keys and URLs
+    telegram_token: str = field(default_factory=lambda: os.getenv('TELEGRAM_BOT_TOKEN', ''))
+    solana_rpc_url: str = field(default_factory=lambda: os.getenv('SOLANA_RPC_URL', ''))
+    wallet_id: str = field(default_factory=lambda: os.getenv('WALLET_ID', ''))
+    wallet_seed_phrase: str = field(default_factory=lambda: os.getenv('WALLET_SEED_PHRASE', ''))
 
     def validate(self) -> bool:
         """Validate the configuration."""
@@ -46,8 +55,10 @@ class Config:
             raise ValueError("TELEGRAM_BOT_TOKEN not found in environment")
         if not self.solana_rpc_url:
             raise ValueError("SOLANA_RPC_URL not found in environment")
-        if not self.wallet_private_key:
-            raise ValueError("WALLET_PRIVATE_KEY not found in environment")
+        if not self.wallet_id:
+            raise ValueError("WALLET_ID not found in environment")
+        if not self.wallet_seed_phrase:
+            raise ValueError("WALLET_SEED_PHRASE not found in environment")
         return True
 
 # Global configuration instance

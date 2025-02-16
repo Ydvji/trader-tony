@@ -12,8 +12,8 @@ from solders.system_program import transfer, TransferParams
 from solders.pubkey import Pubkey as PublicKey
 from solders.keypair import Keypair
 
-from .risk import RiskAnalyzer
-from ..utils.config import config
+from trading.risk import RiskAnalyzer
+from utils.config import config
 
 @dataclass
 class SnipeConfig:
@@ -36,7 +36,7 @@ class RaydiumSniper:
         self.client = client
         self.wallet = wallet
         self.risk_analyzer = risk_analyzer
-        self.RAYDIUM_PROGRAM_ID = PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8')
+        self.RAYDIUM_PROGRAM_ID = PublicKey.from_string('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8')
 
     async def setup_snipe(self, params: Dict[str, Any]) -> SnipeConfig:
         """Set up a snipe operation."""
@@ -279,7 +279,10 @@ class RaydiumSniper:
     async def execute_sell(self, config: Dict[str, Any], exit_type: str) -> Optional[str]:
         """Execute a sell operation."""
         try:
-            transaction = await self.build_sell_transaction(config)
+            transaction = await self.build_sell_transaction(
+                token_address=config['token_address'],
+                slippage=config.get('slippage', 1.0)  # Default 1% slippage for exits
+            )
             signature = await self.send_and_confirm_transaction(transaction)
             
             print(f'{exit_type} executed successfully:', {
@@ -295,6 +298,125 @@ class RaydiumSniper:
             print(f'Sell execution failed: {str(e)}')
             return None
 
+    async def build_sell_transaction(self, token_address: str, slippage: float) -> Transaction:
+        """Build a transaction to sell tokens back to SOL."""
+        try:
+            # Convert addresses to PublicKey
+            token_mint = PublicKey(token_address)
+            
+            # Get token account
+            token_account = await self._find_associated_token_address(
+                self.wallet.public_key(),
+                token_mint
+            )
+            
+            # Get token balance
+            account_info = await self.client.get_account_info(token_account)
+            if not account_info:
+                raise Exception("No token account found")
+                
+            # Get token amount to sell (full balance)
+            token_balance = int.from_bytes(
+                account_info.data[64:72],  # Token amount offset in account data
+                'little'
+            )
+            
+            if token_balance == 0:
+                raise Exception("No tokens to sell")
+                
+            # Create swap instructions for selling
+            instructions = await self.create_raydium_swap_instructions_for_sell(
+                token_address=token_address,
+                amount=token_balance,
+                slippage=slippage
+            )
+            
+            # Build transaction
+            transaction = Transaction()
+            transaction.add(*instructions)
+            
+            return transaction
+            
+        except Exception as e:
+            raise Exception(f"Failed to build sell transaction: {str(e)}")
+            
+    async def create_raydium_swap_instructions_for_sell(
+        self,
+        token_address: str,
+        amount: int,
+        slippage: float
+    ) -> list:
+        """Create Raydium swap instructions for token sale."""
+        try:
+            # Convert token address to PublicKey
+            token_mint = PublicKey.from_string(token_address)
+            
+            # Get pool state accounts
+            pool_keys = await self._get_pool_keys(token_mint)
+            
+            # Calculate minimum output amount with slippage
+            current_price = await self.get_current_price(token_address)
+            expected_sol = amount * current_price
+            min_amount_out = int(expected_sol * (1 - slippage / 100))
+            
+            # Build swap instruction
+            swap_instruction = await self._build_swap_instruction(
+                amount_in=amount,
+                min_amount_out=min_amount_out,
+                pool_keys=pool_keys,
+                is_sol_input=False  # We're selling tokens for SOL
+            )
+            
+            # Get token account
+            token_account = await self._find_associated_token_address(
+                self.wallet.public_key(),
+                token_mint
+            )
+            
+            # Build complete instruction set
+            instructions = [
+                # Approve token spending
+                self._create_token_approve_instruction(
+                    token_account=token_account,
+                    delegate=pool_keys['authority'],
+                    amount=amount
+                ),
+                # Execute swap
+                swap_instruction
+            ]
+            
+            return instructions
+            
+        except Exception as e:
+            raise Exception(f"Failed to create sell instructions: {str(e)}")
+            
+    def _create_token_approve_instruction(
+        self,
+        token_account: PublicKey,
+        delegate: PublicKey,
+        amount: int
+    ) -> Transaction:
+        """Create instruction to approve token spending."""
+        TOKEN_PROGRAM_ID = PublicKey.from_string('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
+        
+        # Build approve instruction
+        data = bytes([
+            3,  # Approve instruction index
+            *amount.to_bytes(8, 'little')  # Amount to approve
+        ])
+        
+        accounts = [
+            AccountMeta(pubkey=token_account, is_signer=False, is_writable=True),
+            AccountMeta(pubkey=delegate, is_signer=False, is_writable=False),
+            AccountMeta(pubkey=self.wallet.public_key(), is_signer=True, is_writable=False)
+        ]
+        
+        return Transaction().add(
+            TOKEN_PROGRAM_ID,
+            accounts,
+            data
+        )
+
     async def create_raydium_swap_instructions(self, token_address: str, amount: float, slippage: float):
         """Create Raydium swap instructions for token purchase."""
         try:
@@ -302,8 +424,8 @@ class RaydiumSniper:
             token_mint = PublicKey(token_address)
             
             # Constants for Raydium V4
-            RAYDIUM_AMM_PROGRAM_ID = PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8')
-            SOL_MINT = PublicKey('So11111111111111111111111111111111111111112')
+            RAYDIUM_AMM_PROGRAM_ID = PublicKey.from_string('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8')
+            SOL_MINT = PublicKey.from_string('So11111111111111111111111111111111111111112')
             
             # Get pool state accounts
             pool_keys = await self._get_pool_keys(token_mint)
@@ -445,11 +567,11 @@ class RaydiumSniper:
         """Find the associated token account address."""
         seeds = [
             bytes(wallet_address),
-            bytes(PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')),  # Token program ID
+            bytes(PublicKey.from_string('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')),  # Token program ID
             bytes(token_mint)
         ]
         
-        program_id = PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL')  # Associated token program ID
+        program_id = PublicKey.from_string('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL')  # Associated token program ID
         
         return PublicKey.find_program_address(seeds, program_id)[0]
 
