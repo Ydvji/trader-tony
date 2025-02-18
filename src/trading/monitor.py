@@ -1,154 +1,188 @@
 """
-Token monitoring and alert system for Trader Tony.
-Based on the monitoring system from trading-agent.
+Monitoring module for Trader Tony.
+Handles mempool monitoring and new pool detection.
 """
-import logging
-from typing import Optional, List, Dict
-from dataclasses import dataclass
-from datetime import datetime
+import asyncio
+import json
+from typing import Dict, List, Optional, Callable
 from solana.rpc.async_api import AsyncClient
+from solana.rpc.websocket_api import connect
+from solana.rpc.commitment import Commitment
 from solders.pubkey import Pubkey as PublicKey
-
-from ..utils.config import config
-
-logger = logging.getLogger(__name__)
-
-@dataclass
-class TokenAlert:
-    """Represents a token alert."""
-    token_address: str
-    alert_type: str
-    details: str
-    timestamp: datetime
-    risk_level: Optional[int] = None
-    price_change: Optional[float] = None
-    liquidity_change: Optional[float] = None
+from src.utils.config import config
 
 class TokenMonitor:
-    """Monitors tokens for various events and conditions."""
+    """Monitors mempool and new token launches."""
     
     def __init__(self, client: AsyncClient):
-        """Initialize the token monitor."""
         self.client = client
-        self.active_monitors: Dict[str, Dict] = {}
-        self.alerts: List[TokenAlert] = []
+        self.ws_client = None
+        self.monitoring = False
+        self.callbacks: List[Callable] = []
+        
+        # Raydium program IDs
+        self.RAYDIUM_PROGRAM_ID = PublicKey.from_string('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8')
+        self.POOL_PROGRAM_ID = PublicKey.from_string('9KEPoZmtHUrBbhWN1v1KWLMkkvwY6WLtAVUCPRtRjP4z')
+        
+        # Monitoring settings
+        self.settings = {
+            'min_liquidity': config.trading.min_liquidity,
+            'min_holders': config.risk.min_holders,
+            'check_interval': 1000,  # 1 second
+            'price_change_threshold': 5.0,  # 5%
+            'volume_change_threshold': 100.0  # 100%
+        }
 
-    async def start_monitoring(self, token_address: str, params: Dict) -> bool:
-        """Start monitoring a token with specified parameters."""
-        try:
-            # Validate token
-            token_pubkey = PublicKey(token_address)
+    async def start_monitoring(self):
+        """Start monitoring mempool for new pools."""
+        if self.monitoring:
+            return
             
-            # Set up monitoring parameters
-            monitor_config = {
+        self.monitoring = True
+        self.ws_client = await connect("wss://api.mainnet-beta.solana.com")
+        
+        # Subscribe to program subscription
+        await self.ws_client.program_subscribe(
+            self.POOL_PROGRAM_ID,
+            commitment=Commitment("confirmed"),
+            encoding="base64"
+        )
+        
+        # Start processing notifications
+        while self.monitoring:
+            try:
+                msg = await self.ws_client.recv()
+                if msg and 'params' in msg:
+                    await self._handle_new_pool(msg['params'])
+            except Exception as e:
+                print(f"Mempool monitoring error: {str(e)}")
+                await asyncio.sleep(1)
+
+    async def stop_monitoring(self):
+        """Stop mempool monitoring."""
+        self.monitoring = False
+        if self.ws_client:
+            await self.ws_client.close()
+            self.ws_client = None
+
+    def add_callback(self, callback: Callable):
+        """Add callback for new pool notifications."""
+        self.callbacks.append(callback)
+
+    def remove_callback(self, callback: Callable):
+        """Remove callback from notifications."""
+        if callback in self.callbacks:
+            self.callbacks.remove(callback)
+
+    async def _handle_new_pool(self, params: Dict):
+        """Handle new pool notification."""
+        try:
+            # Extract pool data
+            pool_data = params['result']['value']
+            token_address = self._extract_token_from_pool(pool_data)
+            
+            if not token_address:
+                return
+                
+            # Quick analysis
+            pool_info = await self._analyze_pool(token_address, pool_data)
+            
+            # Notify callbacks if pool meets criteria
+            if self._meets_criteria(pool_info):
+                for callback in self.callbacks:
+                    await callback(token_address, pool_info)
+                    
+        except Exception as e:
+            print(f"Error handling new pool: {str(e)}")
+
+    def _extract_token_from_pool(self, pool_data: Dict) -> Optional[str]:
+        """Extract token address from pool data."""
+        try:
+            # Extract token mint from pool account data
+            data = pool_data['data'][0]
+            token_offset = 72  # Token mint offset in pool data
+            token_bytes = data[token_offset:token_offset + 32]
+            return str(PublicKey.from_bytes(token_bytes))
+        except Exception:
+            return None
+
+    async def _analyze_pool(self, token_address: str, pool_data: Dict) -> Dict:
+        """Analyze new pool data."""
+        try:
+            # Extract initial liquidity
+            liquidity = self._calculate_initial_liquidity(pool_data)
+            
+            # Get token metadata
+            metadata = await self._get_token_metadata(token_address)
+            
+            # Calculate initial price
+            price = self._calculate_initial_price(pool_data)
+            
+            return {
                 'token_address': token_address,
-                'price_threshold': params.get('price_threshold', 5.0),  # 5% change
-                'liquidity_threshold': params.get('liquidity_threshold', 10.0),  # 10% change
-                'volume_threshold': params.get('volume_threshold', 100.0),  # 100% change
-                'check_interval': params.get('check_interval', 60),  # 60 seconds
-                'last_check': datetime.now(),
-                'last_price': await self.get_token_price(token_address),
-                'last_liquidity': await self.get_token_liquidity(token_address)
+                'token_name': metadata.get('name', 'Unknown'),
+                'token_symbol': metadata.get('symbol', 'UNKNOWN'),
+                'initial_liquidity': liquidity,
+                'initial_price': price,
+                'timestamp': pool_data.get('blockTime', 0)
+            }
+            
+        except Exception as e:
+            return {
+                'token_address': token_address,
+                'error': str(e)
             }
 
-            self.active_monitors[token_address] = monitor_config
-            logger.info(f"Started monitoring {token_address}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error starting monitor for {token_address}: {str(e)}")
-            return False
-
-    async def stop_monitoring(self, token_address: str) -> bool:
-        """Stop monitoring a token."""
-        if token_address in self.active_monitors:
-            del self.active_monitors[token_address]
-            logger.info(f"Stopped monitoring {token_address}")
-            return True
-        return False
-
-    async def check_token(self, token_address: str) -> List[TokenAlert]:
-        """Check a token for alert conditions."""
-        if token_address not in self.active_monitors:
-            return []
-
-        config = self.active_monitors[token_address]
-        alerts = []
-
+    def _calculate_initial_liquidity(self, pool_data: Dict) -> float:
+        """Calculate initial pool liquidity in USD."""
         try:
-            # Get current metrics
-            current_price = await self.get_token_price(token_address)
-            current_liquidity = await self.get_token_liquidity(token_address)
+            data = pool_data['data'][0]
+            sol_reserve = int.from_bytes(data[208:216], 'little') / 1e9
+            return sol_reserve * 100.0  # Assuming $100 SOL price
+        except Exception:
+            return 0.0
 
-            # Check price change
-            if current_price and config['last_price']:
-                price_change = ((current_price - config['last_price']) / config['last_price']) * 100
-                if abs(price_change) >= config['price_threshold']:
-                    alerts.append(TokenAlert(
-                        token_address=token_address,
-                        alert_type='PRICE_CHANGE',
-                        details=f"Price changed by {price_change:.2f}%",
-                        timestamp=datetime.now(),
-                        price_change=price_change
-                    ))
+    def _calculate_initial_price(self, pool_data: Dict) -> float:
+        """Calculate initial token price."""
+        try:
+            data = pool_data['data'][0]
+            base_reserve = int.from_bytes(data[200:208], 'little')
+            quote_reserve = int.from_bytes(data[208:216], 'little')
+            
+            if base_reserve == 0:
+                return 0.0
+                
+            return quote_reserve / base_reserve * 1e9
+        except Exception:
+            return 0.0
 
-            # Check liquidity change
-            if current_liquidity and config['last_liquidity']:
-                liquidity_change = ((current_liquidity - config['last_liquidity']) / config['last_liquidity']) * 100
-                if abs(liquidity_change) >= config['liquidity_threshold']:
-                    alerts.append(TokenAlert(
-                        token_address=token_address,
-                        alert_type='LIQUIDITY_CHANGE',
-                        details=f"Liquidity changed by {liquidity_change:.2f}%",
-                        timestamp=datetime.now(),
-                        liquidity_change=liquidity_change
-                    ))
+    async def _get_token_metadata(self, token_address: str) -> Dict:
+        """Get token metadata."""
+        try:
+            response = await self.client.get_account_info(
+                PublicKey(token_address),
+                encoding="jsonParsed"
+            )
+            
+            if not response.value:
+                return {}
+                
+            data = response.value
+            
+            return {
+                'name': data.get('data', {}).get('parsed', {}).get('info', {}).get('name', 'Unknown'),
+                'symbol': data.get('data', {}).get('parsed', {}).get('info', {}).get('symbol', 'UNKNOWN'),
+                'supply': float(data.get('data', {}).get('parsed', {}).get('info', {}).get('supply', 0))
+            }
+        except Exception:
+            return {}
 
-            # Update last values
-            config['last_price'] = current_price
-            config['last_liquidity'] = current_liquidity
-            config['last_check'] = datetime.now()
-
-            # Store alerts
-            self.alerts.extend(alerts)
-            return alerts
-
-        except Exception as e:
-            logger.error(f"Error checking token {token_address}: {str(e)}")
-            return []
-
-    async def get_token_price(self, token_address: str) -> Optional[float]:
-        """Get current token price."""
-        # Implementation depends on Raydium API
-        # This is a placeholder
-        return 0.0
-
-    async def get_token_liquidity(self, token_address: str) -> Optional[float]:
-        """Get current token liquidity."""
-        # Implementation depends on Raydium API
-        # This is a placeholder
-        return 0.0
-
-    def get_recent_alerts(self, limit: int = 10) -> List[TokenAlert]:
-        """Get recent alerts."""
-        return sorted(self.alerts, key=lambda x: x.timestamp, reverse=True)[:limit]
-
-    def format_alert_message(self, alert: TokenAlert) -> str:
-        """Format an alert for Telegram message."""
-        message = f"""
-🚨 {alert.alert_type}
-
-Token: {alert.token_address}
-Time: {alert.timestamp.strftime('%Y-%m-%d %H:%M:%S')}
-Details: {alert.details}
-"""
-        if alert.price_change is not None:
-            message += f"Price Change: {'🔴' if alert.price_change < 0 else '🟢'} {alert.price_change:.2f}%\n"
-        
-        if alert.liquidity_change is not None:
-            message += f"Liquidity Change: {'🔴' if alert.liquidity_change < 0 else '🟢'} {alert.liquidity_change:.2f}%\n"
-        
-        if alert.risk_level is not None:
-            message += f"Risk Level: {'🔴 HIGH' if alert.risk_level > 70 else '🟡 MEDIUM' if alert.risk_level > 30 else '🟢 LOW'}\n"
-
-        return message
+    def _meets_criteria(self, pool_info: Dict) -> bool:
+        """Check if pool meets monitoring criteria."""
+        if 'error' in pool_info:
+            return False
+            
+        return (
+            pool_info['initial_liquidity'] >= self.settings['min_liquidity'] and
+            pool_info['initial_price'] > 0
+        )

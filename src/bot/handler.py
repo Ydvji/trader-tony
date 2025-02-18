@@ -1,17 +1,20 @@
 """
 Telegram bot handler for Trader Tony.
-Manages user interactions and command processing.
+Handles user interactions and command processing.
 """
 import logging
+import asyncio
 from datetime import datetime
 from typing import Optional, Dict, Any
 import telebot
-from telebot.types import Message
+from telebot.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from solana.rpc.async_api import AsyncClient
 
 from ..utils.config import config
-from ..trading.sniper import RaydiumSniper
+from ..trading.sniper import Sniper
 from ..trading.risk import RiskAnalyzer
 from ..trading.monitor import TokenMonitor
+from ..trading.raydium import RaydiumDEX
 
 # Configure logging
 logging.basicConfig(
@@ -23,17 +26,24 @@ logger = logging.getLogger(__name__)
 class TelegramHandler:
     """Handles Telegram bot interactions."""
 
-    def __init__(self, sniper: RaydiumSniper, risk_analyzer: RiskAnalyzer, monitor: TokenMonitor):
+    def __init__(self):
         """Initialize the Telegram bot handler."""
         self.bot = telebot.TeleBot(config.telegram_token)
-        self.sniper = sniper
-        self.risk_analyzer = risk_analyzer
-        self.monitor = monitor
+        self.client = AsyncClient("https://api.mainnet-beta.solana.com")
+        self.risk_analyzer = RiskAnalyzer(self.client)
+        self.monitor = TokenMonitor(self.client)
+        self.raydium = RaydiumDEX(self.client)
+        self.sniper = Sniper(self.client)
+        
+        # Start monitoring
+        asyncio.create_task(self.monitor.start_monitoring())
+        self.monitor.add_callback(self._handle_new_pool)
+        
         self.setup_handlers()
 
     def setup_handlers(self) -> None:
         """Set up message handlers."""
-        # Start command
+        # Command handlers
         @self.bot.message_handler(commands=['start'])
         def start(message: Message) -> None:
             """Handle /start command."""
@@ -42,134 +52,223 @@ class TelegramHandler:
 
 Welcome to Trader Tony Bot. I'm here to help you trade on Solana.
 
+🔥 Features:
+• Token sniping with anti-MEV
+• Real-time pool monitoring
+• Risk analysis and safety checks
+• Auto take-profit/stop-loss
+
 Available commands:
 /start - Show this welcome message
 /help - Show available commands
 /status - Check bot status
 /snipe <token> <amount> - Snipe a token
-/trade <token> <amount> <side> - Place a trade
-/position - View current positions
+/monitor - Start pool monitoring
 /settings - Configure bot settings
-/monitor <token> - Start monitoring a token
-/alerts - View recent alerts
-/stop <token> - Stop monitoring a token
 """
-            self.bot.reply_to(message, welcome_text)
+            # Create inline keyboard
+            keyboard = InlineKeyboardMarkup(row_width=2)
+            keyboard.add(
+                InlineKeyboardButton("💰 Snipe Token", callback_data="cmd_snipe"),
+                InlineKeyboardButton("🔍 Monitor Pools", callback_data="cmd_monitor"),
+                InlineKeyboardButton("⚙️ Settings", callback_data="cmd_settings"),
+                InlineKeyboardButton("ℹ️ Help", callback_data="cmd_help")
+            )
+            
+            self.bot.reply_to(message, welcome_text, reply_markup=keyboard)
             logger.info(f"User {message.from_user.id} started the bot")
 
-        # Help command
-        @self.bot.message_handler(commands=['help'])
-        def help_command(message: Message) -> None:
-            """Handle /help command."""
-            help_text = """
-Trading Commands:
-/snipe <token> <amount> - Snipe a token
-  Example: /snipe So11111111111111111111111111111111111111112 1.5
-  
-/trade <token> <amount> <side> - Place a trade
-  Example: /trade So11111111111111111111111111111111111111112 1 buy
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith('cmd_'))
+        def handle_command_callback(call):
+            """Handle command button callbacks."""
+            command = call.data.split('_')[1]
+            
+            if command == 'snipe':
+                snipe_text = """
+Enter token to snipe:
+• Token address
+• Birdeye URL
+• DEX Screener URL
 
-Position Management:
-/position - View current positions
-/close <position_id> - Close a position
-
-Settings & Info:
-/status - Check bot status
-/settings - Configure bot settings
-/risk <token> - Check token risk score
+Format: /snipe <token> <amount>
+Example: /snipe So11111111111111111111111111111111111111112 1.5
 """
-            self.bot.reply_to(message, help_text)
-            logger.info(f"User {message.from_user.id} requested help")
+                self.bot.edit_message_text(
+                    snipe_text,
+                    call.message.chat.id,
+                    call.message.message_id,
+                    reply_markup=self._get_back_keyboard()
+                )
+                
+            elif command == 'monitor':
+                monitor_text = """
+🔍 Pool Monitoring Active
 
-        # Status command
-        @self.bot.message_handler(commands=['status'])
-        def status(message: Message) -> None:
-            """Handle /status command."""
-            status_text = f"""
-Bot Status:
-✅ Bot Online
-✅ Solana RPC Connected
-✅ Raydium Integration Active
+Monitoring for:
+• New token launches
+• Liquidity additions
+• Price changes
+• Volume spikes
 
-System Info:
-• Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-• Min Liquidity: ${config.trading.min_liquidity}
-• Max Slippage: {config.trading.max_slippage}%
-• Risk Threshold: {config.risk.max_risk_score}
+Use /settings to configure alerts
 """
-            self.bot.reply_to(message, status_text)
-            logger.info(f"User {message.from_user.id} checked status")
+                self.bot.edit_message_text(
+                    monitor_text,
+                    call.message.chat.id,
+                    call.message.message_id,
+                    reply_markup=self._get_back_keyboard()
+                )
+                
+            elif command == 'settings':
+                settings_keyboard = InlineKeyboardMarkup(row_width=2)
+                settings_keyboard.add(
+                    InlineKeyboardButton("🎯 Slippage", callback_data="setting_slippage"),
+                    InlineKeyboardButton("💰 Max Amount", callback_data="setting_max_amount"),
+                    InlineKeyboardButton("⚡ Priority Fee", callback_data="setting_priority_fee"),
+                    InlineKeyboardButton("🔙 Back", callback_data="cmd_back")
+                )
+                
+                self.bot.edit_message_text(
+                    "⚙️ Bot Settings:",
+                    call.message.chat.id,
+                    call.message.message_id,
+                    reply_markup=settings_keyboard
+                )
+                
+            elif command == 'help':
+                help_text = """
+🤖 Bot Commands:
 
-        # Snipe command
+/snipe <token> <amount>
+Snipe a token with amount in SOL
+Example: /snipe So11111111111111111111111111111111111111112 1.5
+
+/monitor
+Start monitoring for new pools
+
+/settings
+Configure bot settings
+
+/status
+Check bot status and network
+"""
+                self.bot.edit_message_text(
+                    help_text,
+                    call.message.chat.id,
+                    call.message.message_id,
+                    reply_markup=self._get_back_keyboard()
+                )
+                
+            elif command == 'back':
+                # Return to main menu
+                start(call.message)
+
         @self.bot.message_handler(commands=['snipe'])
-        def snipe(message: Message) -> None:
-            """Handle /snipe command."""
+        async def snipe_command(message: Message):
+            """Handle snipe command."""
             try:
-                # Parse command arguments
-                args = message.text.split()[1:]
-                if len(args) < 2:
-                    raise ValueError("Missing arguments. Usage: /snipe <token> <amount>")
-
-                token_address = args[0]
-                amount = float(args[1])
-
-                # Create snipe configuration
-                snipe_config = {
-                    'token_address': token_address,
-                    'buy_amount': amount,
-                    'take_profit': config.trading.take_profit,
-                    'stop_loss': config.trading.stop_loss,
-                    'slippage': config.trading.max_slippage,
-                    'priority_fee': config.trading.priority_fee,
-                    'anti_mev': config.trading.anti_mev
-                }
-
-                # Start snipe operation
-                self.bot.reply_to(message, f"🎯 Setting up snipe for {token_address}")
-                self.sniper.setup_snipe(snipe_config)
-                logger.info(f"User {message.from_user.id} initiated snipe for {token_address}")
-
-            except (ValueError, IndexError) as e:
-                self.bot.reply_to(message, f"❌ Error: {str(e)}")
-                logger.error(f"Snipe command error: {str(e)}")
-
-        # Risk check command
-        @self.bot.message_handler(commands=['risk'])
-        async def check_risk(message: Message) -> None:
-            """Handle /risk command."""
-            try:
-                # Parse command arguments
-                args = message.text.split()[1:]
-                if not args:
-                    raise ValueError("Missing token address. Usage: /risk <token>")
-
-                token_address = args[0]
-                self.bot.reply_to(message, f"🔍 Analyzing risks for {token_address}...")
-
-                # Perform risk analysis
-                risk_analysis = await self.risk_analyzer.analyze_token_risks(token_address)
-
-                # Format risk report
-                risk_text = f"""
-Risk Analysis Report:
-
-Risk Level: {risk_analysis.risk_level}/100
-{'🔴 HIGH RISK' if risk_analysis.risk_level > 70 else '🟡 MEDIUM RISK' if risk_analysis.risk_level > 30 else '🟢 LOW RISK'}
-
-Flags:
-{'⚠️ Honeypot Risk' if risk_analysis.is_honeypot else '✅ Not a Honeypot'}
-{'⚠️ Low Liquidity' if risk_analysis.has_low_liquidity else '✅ Good Liquidity'}
-{'⚠️ Suspicious Activity' if risk_analysis.has_suspicious_activity else '✅ No Suspicious Activity'}
-
-Details:
-{risk_analysis.details}
-"""
-                self.bot.reply_to(message, risk_text)
-                logger.info(f"User {message.from_user.id} checked risk for {token_address}")
-
+                # Parse command
+                args = message.text.split()
+                if len(args) != 3:
+                    self.bot.reply_to(
+                        message,
+                        "❌ Invalid format. Use: /snipe <token> <amount>"
+                    )
+                    return
+                
+                token_input = args[1]
+                amount = float(args[2])
+                
+                # Send initial message
+                status_msg = self.bot.reply_to(
+                    message,
+                    "🔍 Analyzing token..."
+                )
+                
+                # Analyze token
+                analysis = await self.risk_analyzer.analyze_token_risks(token_input)
+                if analysis.risk_level > config.risk.max_risk_score:
+                    self.bot.edit_message_text(
+                        f"⚠️ High risk token detected!\n\nRisk Score: {analysis.risk_level}/100\nDetails: {analysis.details}",
+                        status_msg.chat.id,
+                        status_msg.message_id
+                    )
+                    return
+                
+                # Update status
+                self.bot.edit_message_text(
+                    "✅ Token analysis complete\n🔥 Preparing to snipe...",
+                    status_msg.chat.id,
+                    status_msg.message_id
+                )
+                
+                # Execute snipe
+                result = await self.sniper.snipe_token(token_input, amount)
+                
+                if result['success']:
+                    self.bot.edit_message_text(
+                        f"🎯 Snipe successful!\n\nToken: {result['token']}\nAmount: {amount} SOL\nTx: {result['signature']}",
+                        status_msg.chat.id,
+                        status_msg.message_id
+                    )
+                else:
+                    self.bot.edit_message_text(
+                        f"❌ Snipe failed: {result['error']}",
+                        status_msg.chat.id,
+                        status_msg.message_id
+                    )
+                    
             except Exception as e:
                 self.bot.reply_to(message, f"❌ Error: {str(e)}")
-            logger.error(f"Risk check error: {str(e)}")
+
+        async def _handle_new_pool(self, token_address: str, pool_info: Dict):
+            """Handle new pool notification."""
+            try:
+                # Quick risk check
+                analysis = await self.risk_analyzer.analyze_token_risks(token_address)
+                
+                # Format message
+                msg = f"""
+🆕 New Token Pool Detected!
+
+Token: {pool_info['token_name']} ({pool_info['token_symbol']})
+Address: `{token_address}`
+Initial Price: ${pool_info['initial_price']:.6f}
+Initial Liquidity: ${pool_info['initial_liquidity']:,.2f}
+
+Risk Score: {analysis.risk_level}/100
+{analysis.details}
+"""
+                # Create snipe button if risk is acceptable
+                keyboard = None
+                if analysis.risk_level <= config.risk.max_risk_score:
+                    keyboard = InlineKeyboardMarkup()
+                    keyboard.add(
+                        InlineKeyboardButton(
+                            "🎯 Snipe",
+                            callback_data=f"snipe_{token_address}"
+                        )
+                    )
+                
+                # Broadcast to all monitoring users
+                # This would normally use a database of subscribed users
+                self.bot.send_message(
+                    config.admin_chat_id,
+                    msg,
+                    parse_mode='Markdown',
+                    reply_markup=keyboard
+                )
+                
+            except Exception as e:
+                logger.error(f"Error handling new pool: {str(e)}")
+
+        def _get_back_keyboard(self):
+            """Create back button keyboard."""
+            keyboard = InlineKeyboardMarkup()
+            keyboard.add(
+                InlineKeyboardButton("🔙 Back to Menu", callback_data="cmd_back")
+            )
+            return keyboard
 
         # Monitor command
         @self.bot.message_handler(commands=['monitor'])

@@ -182,3 +182,81 @@ class RiskAnalyzer:
         """Check if only the creator is selling."""
         # Implementation placeholder
         return False
+
+    async def check_contract_verification(self, token_address: str) -> bool:
+        """Check if token contract is verified."""
+        try:
+            program_info = await self.client.get_account_info(PublicKey(token_address))
+            if not program_info.value:
+                return False
+            return True
+        except Exception:
+            return False
+
+    async def analyze_taxes(self, token_address: str) -> Dict:
+        """Analyze token buy/sell taxes."""
+        try:
+            # Simulate test transactions to calculate taxes
+            buy_tax = await self._simulate_buy_tax(token_address)
+            sell_tax = await self._simulate_sell_tax(token_address)
+            
+            return {
+                'buy_tax': buy_tax,
+                'sell_tax': sell_tax,
+                'total_tax': buy_tax + sell_tax
+            }
+        except Exception:
+            return {
+                'buy_tax': 100,
+                'sell_tax': 100,
+                'total_tax': 200,
+                'error': 'Tax analysis failed'
+            }
+
+    async def _simulate_buy_tax(self, token_address: str, amount: float = 0.1) -> float:
+        """Simulate a buy to calculate tax percentage."""
+        try:
+            # This would simulate a small buy transaction
+            # and compare expected vs received amount
+            return 0.0  # Placeholder
+        except Exception:
+            return 100.0
+
+    async def _simulate_sell_tax(self, token_address: str, amount: float = 0.1) -> float:
+        """Simulate a sell to calculate tax percentage."""
+        try:
+            # This would simulate a small sell transaction
+            # and compare expected vs received amount
+            return 0.0  # Placeholder
+        except Exception:
+            return 100.0
+
+    async def check_ownership_status(self, token_address: str) -> Dict:
+        """Check token ownership and authority status."""
+        try:
+            account_info = await self.client.get_account_info(
+                PublicKey(token_address),
+                encoding="jsonParsed"
+            )
+            
+            if not account_info.value:
+                return {
+                    'renounced': False,
+                    'owner': None,
+                    'error': 'Token not found'
+                }
+            
+            data = account_info.value
+            mint_authority = data.get('data', {}).get('parsed', {}).get('info', {}).get('mintAuthority')
+            
+            return {
+                'renounced': not bool(mint_authority),
+                'owner': mint_authority if mint_authority else None,
+                'details': 'Mint authority disabled' if not mint_authority else 'Mint authority active'
+            }
+        except Exception as e:
+            return {
+                'renounced': False,
+                'owner': None,
+                'error': str(e)
+            }

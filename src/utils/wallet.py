@@ -2,15 +2,16 @@
 Wallet utilities for Trader Tony.
 Handles wallet connection and basic transaction functionality.
 """
-from solana.rpc.api import Client
+from solana.rpc.async_api import AsyncClient
 from solders.keypair import Keypair
+from solders.transaction import Transaction
 from mnemonic import Mnemonic
 from src.utils.config import config
 
 class Wallet:
-    def __init__(self, keypair: Keypair = None, seed_phrase: str = None):
+    def __init__(self, keypair: Keypair = None, seed_phrase: str = None, client: AsyncClient = None):
         """Initialize wallet with either keypair or seed phrase"""
-        self.client = Client(config.solana_rpc_url)
+        self.client = client or AsyncClient(config.solana_rpc_url)
         
         if keypair:
             self.keypair = keypair
@@ -35,29 +36,31 @@ class Wallet:
         return Keypair()
 
     @classmethod
-    def create_new(cls):
+    def create_new(cls, client: AsyncClient = None):
         """Create new wallet instance"""
-        return cls()
+        return cls(client=client)
 
-    def get_balance(self) -> float:
+    async def get_balance(self) -> float:
         """Get wallet balance in SOL"""
         try:
-            balance = self.client.get_balance(self.keypair.pubkey())
-            return balance.value / 1e9  # Convert lamports to SOL
+            response = await self.client.get_balance(self.keypair.pubkey())
+            if response.value is not None:
+                return response.value / 1e9  # Convert lamports to SOL
+            return 0.0
         except Exception as e:
             print(f"Error getting balance: {str(e)}")
             return 0.0
 
-    def verify_connection(self) -> bool:
+    async def verify_connection(self) -> bool:
         """Verify wallet connection and balance"""
         try:
             # Check if we can get balance
-            balance = self.get_balance()
+            balance = await self.get_balance()
             if balance == 0:
                 print("Warning: Wallet has 0 SOL balance")
             
             # Verify RPC connection by getting recent blockhash
-            blockhash = self.client.get_recent_blockhash()
+            blockhash = await self.get_recent_blockhash()
             if not blockhash:
                 print("Error: Could not get recent blockhash")
                 return False
@@ -67,28 +70,69 @@ class Wallet:
             print(f"Error verifying wallet connection: {str(e)}")
             return False
 
-    def get_recent_blockhash(self) -> str:
+    async def get_recent_blockhash(self) -> str:
         """Get recent blockhash"""
         try:
-            return self.client.get_recent_blockhash()['result']['value']['blockhash']
+            response = await self.client.get_recent_blockhash()
+            if response.value:
+                return response.value.blockhash
+            return None
         except Exception as e:
             print(f"Error getting recent blockhash: {str(e)}")
             return None
 
-    def sign_transaction(self, transaction):
+    def sign_transaction(self, transaction: Transaction) -> Transaction:
         """Sign a transaction with wallet keypair"""
         try:
-            transaction.sign(self.keypair)
+            transaction.sign([self.keypair])
             return transaction
         except Exception as e:
             print(f"Error signing transaction: {str(e)}")
             return None
 
-    def send_transaction(self, transaction):
+    async def send_transaction(self, transaction: Transaction) -> str:
         """Send a signed transaction"""
         try:
-            result = self.client.send_transaction(transaction)
-            return result['result']
+            # Get recent blockhash
+            blockhash = await self.get_recent_blockhash()
+            if not blockhash:
+                raise Exception("Could not get recent blockhash")
+                
+            # Update transaction blockhash
+            transaction.recent_blockhash = blockhash
+            
+            # Sign and send
+            signed_tx = self.sign_transaction(transaction)
+            if not signed_tx:
+                raise Exception("Failed to sign transaction")
+                
+            response = await self.client.send_transaction(signed_tx)
+            if response.value:
+                return response.value
+            raise Exception("No transaction signature returned")
+            
         except Exception as e:
             print(f"Error sending transaction: {str(e)}")
+            return None
+
+    async def build_transaction(self, instructions: list) -> Transaction:
+        """Build a transaction from instructions"""
+        try:
+            # Get recent blockhash
+            blockhash = await self.get_recent_blockhash()
+            if not blockhash:
+                raise Exception("Could not get recent blockhash")
+                
+            # Create transaction
+            transaction = Transaction()
+            transaction.recent_blockhash = blockhash
+            
+            # Add instructions
+            for ix in instructions:
+                transaction.add(ix)
+                
+            return transaction
+            
+        except Exception as e:
+            print(f"Error building transaction: {str(e)}")
             return None

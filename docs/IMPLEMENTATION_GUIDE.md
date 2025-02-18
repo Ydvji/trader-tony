@@ -4,6 +4,35 @@
 
 This guide outlines the implementation of TraderTony, a Telegram-based trading bot for Solana tokens. The implementation focuses on simplicity and core functionality.
 
+## Recent Updates (February 2025)
+
+### Interface Improvements
+- Switched to InlineKeyboardMarkup for cleaner UI
+- Added emoji support for better visual feedback
+- Implemented compact button layout
+- Enhanced message formatting
+
+### Configuration Enhancements
+- Added comprehensive trading settings
+  - Slippage controls
+  - Priority fees
+  - Anti-MEV protection
+  - Default amounts
+- Enhanced risk management settings
+  - Token verification requirements
+  - Tax limits
+  - Liquidity thresholds
+- Added monitoring configuration
+  - Price change alerts
+  - Liquidity monitoring
+  - Volume tracking
+
+### Technical Improvements
+- Implemented async/await for better performance
+- Added shared Solana client instance
+- Enhanced transaction handling
+- Improved error handling and user feedback
+
 ## Core Components
 
 1. Telegram Bot Interface
@@ -94,11 +123,15 @@ This guide outlines the implementation of TraderTony, a Telegram-based trading b
    - ✅ RPC URL
    - ✅ Trading parameters
    - ✅ Safety limits
+   - ✅ Admin chat ID
+   - ✅ API keys
 
 2. Trading Parameters
    - ✅ Slippage settings
    - ✅ Minimum balances
    - ✅ Transaction limits
+   - ✅ Priority fees
+   - ✅ Anti-MEV settings
 
 ## Development Workflow
 
