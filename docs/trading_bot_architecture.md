@@ -1,71 +1,115 @@
-flowchart TD
-    subgraph User Interface
-        TG[Telegram Bot]
-        TG --> CMD[Command Handler]
-        CMD --> SNP[Snipe Command]
-        CMD --> SHT[Short Command]
-        CMD --> SET[Settings Command]
-        CMD --> MON[Monitor Command]
-    end
+# TraderTony Bot Architecture
 
-    subgraph Core Functionality
-        SNP --> Sniper[Sniper Module]
-        SHT --> Shorter[Shorter Module]
-        
-        Sniper --> RA[Risk Analysis]
-        Shorter --> RA
-        
-        Sniper --> TE[Transaction Engine]
-        Shorter --> TE
-        
-        Sniper --> PM[Position Manager]
-        Shorter --> PM
-    end
+## Overview
 
-    subgraph Risk Analysis
-        RA --> CA[Contract Analysis]
-        RA --> LP[Liquidity Analysis]
-        RA --> RD[Rug Detection]
-        RA --> HD[Holder Distribution]
-    end
+TraderTony is a Telegram-based trading bot for Solana tokens, focusing on simplicity and ease of use. The bot enables users to:
+- View token information
+- Create and manage wallets
+- Execute trades on Raydium DEX
+- Monitor balances and transactions
 
-    subgraph Transaction Engine
-        TE --> GAS[Gas Optimizer]
-        TE --> MEV[Anti-MEV]
-        TE --> SL[Slippage Control]
-    end
+## Core Components
 
-    subgraph Position Manager
-        PM --> TP[Take Profit]
-        PM --> SL[Stop Loss]
-        PM --> TS[Trailing Stop]
-        PM --> EM[Emergency Exit]
-    end
+### 1. Telegram Bot Interface (main.py)
+- Handles user interactions
+- Manages commands and keyboard interface
+- Processes token URLs and addresses
+- Displays token information and trading options
 
-    subgraph Network Layer
-        ETH[Ethereum]
-        SOL[Solana]
-        TE --> ETH
-        TE --> SOL
-    end
+### 2. Wallet Management (wallet.py)
+- Creates and manages Solana wallets
+- Handles balance checking
+- Manages transaction signing
+- Provides secure key storage
 
-    subgraph DEX Integration
-        ETH --> UNI[Uniswap]
-        SOL --> RAY[Raydium]
-        ETH --> GMX[GMX]
-        ETH --> DYDX[dYdX]
-    end
+### 3. Trading Module (sniper.py)
+- Interfaces with Raydium DEX
+- Fetches token information
+- Calculates prices and liquidity
+- Processes token metadata
 
-    subgraph Monitoring
-        MON --> PRC[Price Monitor]
-        MON --> LIQ[Liquidity Monitor]
-        MON --> VOL[Volume Monitor]
-        MON --> ALT[Alert System]
-    end
+### 4. Configuration (config.py)
+- Manages environment variables
+- Stores API endpoints
+- Handles trading parameters
 
-    subgraph Data Storage
-        DB[(Database)]
-        PM --> DB
-        RA --> DB
-        MON --> DB
-    end
+## Data Flow
+
+```mermaid
+graph TD
+    User[User] --> TG[Telegram Bot]
+    TG --> Wallet[Wallet Manager]
+    TG --> Trading[Trading Module]
+    Wallet --> Solana[Solana Network]
+    Trading --> Raydium[Raydium DEX]
+    Trading --> Solana
+```
+
+## Key Features
+
+1. Token Information
+   - Price data
+   - Market cap
+   - Liquidity info
+   - 24h volume
+   - Chart links
+
+2. Wallet Operations
+   - Balance checking
+   - Transaction signing
+   - Address management
+   - Fund deposits
+
+3. Trading Functions
+   - Token lookup
+   - Price checking
+   - Buy/Sell operations
+   - Transaction status
+
+## User Interface
+
+The bot provides a simple keyboard interface with the following options:
+- Buy: Enter token to purchase
+- Fund: Deposit SOL to wallet
+- Wallet: View wallet info
+- Refresh: Update balance
+- Settings: Basic configuration
+- DCA/Limit Orders: Advanced trading
+
+## Dependencies
+
+Essential packages required:
+- pyTelegramBotAPI: Telegram bot functionality
+- solana: Solana blockchain interaction
+- solders: Solana transaction handling
+- python-dotenv: Environment configuration
+
+## Security Considerations
+
+1. Wallet Security
+   - Secure key generation
+   - Safe transaction signing
+   - Balance protection
+
+2. Trading Safety
+   - Input validation
+   - Transaction verification
+   - Error handling
+
+## Error Handling
+
+The bot implements comprehensive error handling for:
+- Invalid token addresses
+- Failed transactions
+- Network issues
+- API errors
+- Balance insufficiency
+
+## Future Improvements
+
+Potential enhancements:
+1. Token price alerts
+2. Portfolio tracking
+3. Advanced trading strategies
+4. Multi-wallet support
+5. Enhanced price data

@@ -2,53 +2,93 @@
 Wallet utilities for Trader Tony.
 Handles wallet connection and basic transaction functionality.
 """
-from solana.rpc.async_api import AsyncClient
+from solana.rpc.api import Client
 from solders.keypair import Keypair
 from mnemonic import Mnemonic
-from utils.config import config
+from src.utils.config import config
 
-async def setup_wallet():
-    """Initialize wallet and RPC client connection."""
-    try:
-        # Convert mnemonic to seed
+class Wallet:
+    def __init__(self, keypair: Keypair = None, seed_phrase: str = None):
+        """Initialize wallet with either keypair or seed phrase"""
+        self.client = Client(config.solana_rpc_url)
+        
+        if keypair:
+            self.keypair = keypair
+        elif seed_phrase:
+            self.keypair = self._create_from_seed(seed_phrase)
+        else:
+            self.keypair = self._create_new()
+            
+        self.address = str(self.keypair.pubkey())
+
+    @staticmethod
+    def _create_from_seed(seed_phrase: str) -> Keypair:
+        """Create keypair from seed phrase"""
         mnemo = Mnemonic("english")
-        seed = mnemo.to_seed(config.wallet_seed_phrase)
-        
-        # Use first 32 bytes of the seed for Keypair
+        seed = mnemo.to_seed(seed_phrase)
         seed_bytes = seed[:32]
-        wallet = Keypair.from_seed(bytes(seed_bytes))
-        
-        # Initialize RPC client with Helius endpoint
-        client = AsyncClient(config.solana_rpc_url)
-        
-        # Verify connection
-        version = await client.get_version()
-        print(f"Connected to Solana node version: {version.value.solana_core}")
-        
-        # Get wallet balance
-        balance = await client.get_balance(wallet.pubkey())
-        print(f"Wallet balance: {balance.value / 1e9} SOL")
-        
-        return wallet, client
-    except Exception as e:
-        raise Exception(f"Failed to setup wallet: {str(e)}")
+        return Keypair.from_seed(bytes(seed_bytes))
 
-async def verify_wallet_connection(wallet: Keypair, client: AsyncClient) -> bool:
-    """Verify wallet connection and balance."""
-    try:
-        # Check if wallet has a balance
-        balance = await client.get_balance(wallet.pubkey())
-        if balance.value == 0:
-            print("Warning: Wallet has 0 SOL balance")
-            return False
+    @staticmethod
+    def _create_new() -> Keypair:
+        """Create new random keypair"""
+        return Keypair()
+
+    @classmethod
+    def create_new(cls):
+        """Create new wallet instance"""
+        return cls()
+
+    def get_balance(self) -> float:
+        """Get wallet balance in SOL"""
+        try:
+            balance = self.client.get_balance(self.keypair.pubkey())
+            return balance.value / 1e9  # Convert lamports to SOL
+        except Exception as e:
+            print(f"Error getting balance: {str(e)}")
+            return 0.0
+
+    def verify_connection(self) -> bool:
+        """Verify wallet connection and balance"""
+        try:
+            # Check if we can get balance
+            balance = self.get_balance()
+            if balance == 0:
+                print("Warning: Wallet has 0 SOL balance")
             
-        # Verify we can get recent blockhash (tests RPC connection)
-        blockhash = await client.get_recent_blockhash()
-        if not blockhash:
-            print("Error: Could not get recent blockhash")
+            # Verify RPC connection by getting recent blockhash
+            blockhash = self.client.get_recent_blockhash()
+            if not blockhash:
+                print("Error: Could not get recent blockhash")
+                return False
+                
+            return True
+        except Exception as e:
+            print(f"Error verifying wallet connection: {str(e)}")
             return False
-            
-        return True
-    except Exception as e:
-        print(f"Error verifying wallet connection: {str(e)}")
-        return False
+
+    def get_recent_blockhash(self) -> str:
+        """Get recent blockhash"""
+        try:
+            return self.client.get_recent_blockhash()['result']['value']['blockhash']
+        except Exception as e:
+            print(f"Error getting recent blockhash: {str(e)}")
+            return None
+
+    def sign_transaction(self, transaction):
+        """Sign a transaction with wallet keypair"""
+        try:
+            transaction.sign(self.keypair)
+            return transaction
+        except Exception as e:
+            print(f"Error signing transaction: {str(e)}")
+            return None
+
+    def send_transaction(self, transaction):
+        """Send a signed transaction"""
+        try:
+            result = self.client.send_transaction(transaction)
+            return result['result']
+        except Exception as e:
+            print(f"Error sending transaction: {str(e)}")
+            return None
